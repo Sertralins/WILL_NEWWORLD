@@ -1,0 +1,199 @@
+using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.UI;
+
+namespace WILL.UI
+{
+    public class BigImageViewer : MonoBehaviour, IBeginDragHandler, IDragHandler, IEndDragHandler
+    {
+        [Header("References")]
+        [SerializeField] private ScrollRect scrollRect;
+        [SerializeField] private RectTransform viewport;
+        [SerializeField] private RectTransform content;
+
+        [Header("Behavior")]
+        [Tooltip("拖拽时是否关闭惯性。回弹已强制关闭（Clamped）。")]
+        [SerializeField] private bool disableInertia = true;
+
+        private bool isDragging;
+        private Vector2 lastPointerLocalInViewport;
+
+        private void Awake()
+        {
+            if (scrollRect == null)
+            {
+                TryGetComponent(out scrollRect);
+            }
+
+            if (scrollRect != null)
+            {
+                if (viewport == null) viewport = scrollRect.viewport;
+                if (content == null) content = scrollRect.content;
+            }
+
+            if (viewport == null && transform is RectTransform rt)
+            {
+                viewport = rt;
+            }
+        }
+
+        private void OnEnable()
+        {
+            // 禁用回弹（弹性），使用硬夹紧
+            if (scrollRect != null)
+            {
+                scrollRect.movementType = ScrollRect.MovementType.Clamped;
+                scrollRect.elasticity = 0f;
+                if (disableInertia) scrollRect.inertia = false;
+
+                // 为避免与 ScrollRect 自身的拖拽逻辑产生冲突，这里关闭其交互，仅保留遮罩/滚动条等可视能力
+                scrollRect.enabled = false;
+            }
+
+            ClampToViewportBounds();
+        }
+
+        public void OnBeginDrag(PointerEventData eventData)
+        {
+            if (!IsValid()) return;
+            isDragging = true;
+            lastPointerLocalInViewport = ScreenToViewportLocal(eventData);
+        }
+
+        public void OnDrag(PointerEventData eventData)
+        {
+            if (!isDragging || !IsValid()) return;
+
+            Vector2 pointerLocalNow = ScreenToViewportLocal(eventData);
+            Vector2 deltaLocalInViewport = pointerLocalNow - lastPointerLocalInViewport;
+            lastPointerLocalInViewport = pointerLocalNow;
+
+            // 将位移应用到 content 的 anchoredPosition（假设 content 的父物体为 viewport）
+            if (content != null)
+            {
+                // 若 content 的父对象不是 viewport，需要进行坐标系转换
+                RectTransform parentRect = content.parent as RectTransform;
+                if (parentRect == viewport)
+                {
+                    content.anchoredPosition += deltaLocalInViewport;
+                }
+                else
+                {
+                    Vector3 worldDelta = viewport.TransformVector(new Vector3(deltaLocalInViewport.x, deltaLocalInViewport.y, 0f));
+                    Vector3 parentLocalDelta = parentRect != null
+                        ? parentRect.InverseTransformVector(worldDelta)
+                        : worldDelta;
+                    content.anchoredPosition += (Vector2)parentLocalDelta;
+                }
+
+                ClampToViewportBounds();
+            }
+        }
+
+        public void OnEndDrag(PointerEventData eventData)
+        {
+            isDragging = false;
+            ClampToViewportBounds();
+        }
+
+        private void OnRectTransformDimensionsChange()
+        {
+            // 视口或内容尺寸变化时，重新夹紧
+            ClampToViewportBounds();
+        }
+
+        private bool IsValid()
+        {
+            return viewport != null && content != null;
+        }
+
+        private Vector2 ScreenToViewportLocal(PointerEventData eventData)
+        {
+            Vector2 localPoint;
+            RectTransformUtility.ScreenPointToLocalPointInRectangle(
+                viewport,
+                eventData.position,
+                eventData.pressEventCamera,
+                out localPoint
+            );
+            return localPoint;
+        }
+
+        private void ClampToViewportBounds()
+        {
+            if (!IsValid()) return;
+
+            // 将 content 四个角转换到 viewport 的本地空间
+            Vector3[] contentWorldCorners = new Vector3[4];
+            Vector3[] contentInViewport = new Vector3[4];
+            content.GetWorldCorners(contentWorldCorners);
+            for (int i = 0; i < 4; i++)
+            {
+                contentInViewport[i] = viewport.InverseTransformPoint(contentWorldCorners[i]);
+            }
+
+            Rect vRect = viewport.rect; // 在 viewport 本地空间
+            float vLeft = vRect.xMin;
+            float vRight = vRect.xMax;
+            float vBottom = vRect.yMin;
+            float vTop = vRect.yMax;
+
+            // content 在 viewport 本地空间的边界
+            float cLeft = contentInViewport[0].x;
+            float cBottom = contentInViewport[0].y;
+            float cRight = contentInViewport[2].x;
+            float cTop = contentInViewport[2].y;
+
+            float contentWidth = cRight - cLeft;
+            float contentHeight = cTop - cBottom;
+
+            float dx = 0f;
+            float dy = 0f;
+
+            // X 轴夹紧：当内容比视口小，保持居中；比视口大，限制越界
+            if (contentWidth <= vRect.width)
+            {
+                float vCenterX = (vLeft + vRight) * 0.5f;
+                float cCenterX = (cLeft + cRight) * 0.5f;
+                dx = vCenterX - cCenterX;
+            }
+            else
+            {
+                if (cLeft > vLeft) dx = vLeft - cLeft;
+                else if (cRight < vRight) dx = vRight - cRight;
+            }
+
+            // Y 轴夹紧：当内容比视口小，保持居中；比视口大，限制越界
+            if (contentHeight <= vRect.height)
+            {
+                float vCenterY = (vBottom + vTop) * 0.5f;
+                float cCenterY = (cBottom + cTop) * 0.5f;
+                dy = vCenterY - cCenterY;
+            }
+            else
+            {
+                if (cBottom > vBottom) dy = vBottom - cBottom;
+                else if (cTop < vTop) dy = vTop - cTop;
+            }
+
+            if (Mathf.Approximately(dx, 0f) && Mathf.Approximately(dy, 0f)) return;
+
+            // 将修正从 viewport 本地空间转换到 content 父级空间并应用
+            RectTransform parentRect = content.parent as RectTransform;
+            if (parentRect == viewport)
+            {
+                content.anchoredPosition += new Vector2(dx, dy);
+            }
+            else
+            {
+                Vector3 worldDelta = viewport.TransformVector(new Vector3(dx, dy, 0f));
+                Vector3 parentLocalDelta = parentRect != null
+                    ? parentRect.InverseTransformVector(worldDelta)
+                    : worldDelta;
+                content.anchoredPosition += (Vector2)parentLocalDelta;
+            }
+        }
+    }
+}
+
+
